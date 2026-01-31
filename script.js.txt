@@ -1,0 +1,324 @@
+// CONFIGURATION - Replace with your Supabase credentials
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+// Initialize Supabase client
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Constants
+const MAX_CAPTION_LENGTH = 200;
+const FEED_LIMIT = 50;
+const RATE_LIMIT_SECONDS = 5;
+const DRAFT_KEY = 'caption_draft';
+const HISTORY_KEY = 'posted_captions';
+
+// DOM Elements
+const captionInput = document.getElementById('captionInput');
+const charCounter = document.getElementById('charCounter');
+const postButton = document.getElementById('postButton');
+const postStatus = document.getElementById('postStatus');
+const feedContainer = document.getElementById('feedContainer');
+const refreshButton = document.getElementById('refreshButton');
+const localHistory = document.getElementById('localHistory');
+const clearHistoryButton = document.getElementById('clearHistoryButton');
+
+// State
+let lastPostTime = 0;
+
+// Initialize app
+document.addEventListener('DOMContentLoaded', () => {
+    loadDraft();
+    loadFeed();
+    displayLocalHistory();
+    setupEventListeners();
+});
+
+// Event Listeners
+function setupEventListeners() {
+    captionInput.addEventListener('input', handleInputChange);
+    postButton.addEventListener('click', handlePost);
+    refreshButton.addEventListener('click', loadFeed);
+    clearHistoryButton.addEventListener('click', clearLocalHistory);
+}
+
+// Handle input changes
+function handleInputChange() {
+    const text = captionInput.value;
+    const length = text.length;
+    
+    charCounter.textContent = `${length} / ${MAX_CAPTION_LENGTH}`;
+    
+    // Save draft to localStorage
+    saveDraft(text);
+    
+    // Update character counter color
+    if (length > MAX_CAPTION_LENGTH * 0.9) {
+        charCounter.style.color = 'var(--error-color)';
+    } else {
+        charCounter.style.color = 'var(--text-light)';
+    }
+}
+
+// Save draft to localStorage
+function saveDraft(text) {
+    try {
+        localStorage.setItem(DRAFT_KEY, text);
+    } catch (error) {
+        console.error('Failed to save draft:', error);
+    }
+}
+
+// Load draft from localStorage
+function loadDraft() {
+    try {
+        const draft = localStorage.getItem(DRAFT_KEY);
+        if (draft) {
+            captionInput.value = draft;
+            handleInputChange();
+        }
+    } catch (error) {
+        console.error('Failed to load draft:', error);
+    }
+}
+
+// Clear draft
+function clearDraft() {
+    try {
+        localStorage.removeItem(DRAFT_KEY);
+    } catch (error) {
+        console.error('Failed to clear draft:', error);
+    }
+}
+
+// Handle post submission
+async function handlePost() {
+    const text = captionInput.value.trim();
+    
+    // Validation
+    if (!text) {
+        showStatus('Please enter a caption', 'error');
+        return;
+    }
+    
+    if (text.length > MAX_CAPTION_LENGTH) {
+        showStatus('Caption is too long', 'error');
+        return;
+    }
+    
+    // Rate limiting
+    const now = Date.now();
+    const timeSinceLastPost = (now - lastPostTime) / 1000;
+    
+    if (timeSinceLastPost < RATE_LIMIT_SECONDS) {
+        const waitTime = Math.ceil(RATE_LIMIT_SECONDS - timeSinceLastPost);
+        showStatus(`Please wait ${waitTime} seconds before posting again`, 'error');
+        return;
+    }
+    
+    // Sanitize input
+    const sanitizedText = sanitizeText(text);
+    
+    // Disable button during post
+    postButton.disabled = true;
+    showStatus('Posting...', 'success');
+    
+    try {
+        // Insert into Supabase
+        const { data, error } = await supabase
+            .from('public_captions')
+            .insert([{ caption_text: sanitizedText }])
+            .select();
+        
+        if (error) throw error;
+        
+        // Success
+        lastPostTime = now;
+        showStatus('Posted successfully!', 'success');
+        
+        // Save to local history
+        saveToLocalHistory(data[0]);
+        
+        // Clear input and draft
+        captionInput.value = '';
+        clearDraft();
+        handleInputChange();
+        
+        // Refresh feed
+        await loadFeed();
+        
+        // Display updated local history
+        displayLocalHistory();
+        
+        // Clear status after 3 seconds
+        setTimeout(() => {
+            postStatus.style.display = 'none';
+        }, 3000);
+        
+    } catch (error) {
+        console.error('Post error:', error);
+        showStatus('Failed to post. Please try again.', 'error');
+    } finally {
+        postButton.disabled = false;
+    }
+}
+
+// Sanitize text input
+function sanitizeText(text) {
+    // Remove HTML tags and trim whitespace
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML.trim();
+}
+
+// Show status message
+function showStatus(message, type) {
+    postStatus.textContent = message;
+    postStatus.className = `post-status ${type}`;
+    postStatus.style.display = 'block';
+}
+
+// Load feed from Supabase
+async function loadFeed() {
+    feedContainer.innerHTML = '<div class="loading">Loading captions...</div>';
+    
+    try {
+        const { data, error } = await supabase
+            .from('public_captions')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(FEED_LIMIT);
+        
+        if (error) throw error;
+        
+        if (data.length === 0) {
+            feedContainer.innerHTML = '<div class="loading">No captions yet. Be the first to post!</div>';
+            return;
+        }
+        
+        // Render captions
+        feedContainer.innerHTML = '';
+        data.forEach(caption => {
+            renderCaption(caption);
+        });
+        
+    } catch (error) {
+        console.error('Feed load error:', error);
+        feedContainer.innerHTML = '<div class="error-message">Failed to load captions. Please refresh the page.</div>';
+    }
+}
+
+// Render a single caption
+function renderCaption(caption) {
+    const card = document.createElement('div');
+    card.className = 'caption-card';
+    
+    const text = document.createElement('div');
+    text.className = 'caption-text';
+    text.textContent = caption.caption_text;
+    
+    const timestamp = document.createElement('div');
+    timestamp.className = 'caption-timestamp';
+    timestamp.textContent = getRelativeTime(caption.created_at);
+    
+    card.appendChild(text);
+    card.appendChild(timestamp);
+    feedContainer.appendChild(card);
+}
+
+// Get relative time string
+function getRelativeTime(timestamp) {
+    const now = new Date();
+    const past = new Date(timestamp);
+    const diffInSeconds = Math.floor((now - past) / 1000);
+    
+    if (diffInSeconds < 60) {
+        return `${diffInSeconds} second${diffInSeconds !== 1 ? 's' : ''} ago`;
+    }
+    
+    const diffInMinutes = Math.floor(diffInSeconds / 60);
+    if (diffInMinutes < 60) {
+        return `${diffInMinutes} minute${diffInMinutes !== 1 ? 's' : ''} ago`;
+    }
+    
+    const diffInHours = Math.floor(diffInMinutes / 60);
+    if (diffInHours < 24) {
+        return `${diffInHours} hour${diffInHours !== 1 ? 's' : ''} ago`;
+    }
+    
+    const diffInDays = Math.floor(diffInHours / 24);
+    if (diffInDays < 30) {
+        return `${diffInDays} day${diffInDays !== 1 ? 's' : ''} ago`;
+    }
+    
+    return past.toLocaleDateString();
+}
+
+// Save to local history
+function saveToLocalHistory(caption) {
+    try {
+        const history = getLocalHistory();
+        history.unshift({
+            id: caption.id,
+            text: caption.caption_text,
+            timestamp: caption.created_at
+        });
+        
+        // Keep only last 20 captions
+        const trimmedHistory = history.slice(0, 20);
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmedHistory));
+    } catch (error) {
+        console.error('Failed to save to local history:', error);
+    }
+}
+
+// Get local history
+function getLocalHistory() {
+    try {
+        const history = localStorage.getItem(HISTORY_KEY);
+        return history ? JSON.parse(history) : [];
+    } catch (error) {
+        console.error('Failed to get local history:', error);
+        return [];
+    }
+}
+
+// Display local history
+function displayLocalHistory() {
+    const history = getLocalHistory();
+    
+    if (history.length === 0) {
+        localHistory.innerHTML = '<p class="loading">No captions posted from this device yet.</p>';
+        return;
+    }
+    
+    localHistory.innerHTML = '';
+    history.forEach(caption => {
+        const div = document.createElement('div');
+        div.className = 'local-caption';
+        
+        const text = document.createElement('div');
+        text.textContent = caption.text;
+        
+        const timestamp = document.createElement('div');
+        timestamp.className = 'caption-timestamp';
+        timestamp.textContent = getRelativeTime(caption.timestamp);
+        
+        div.appendChild(text);
+        div.appendChild(timestamp);
+        localHistory.appendChild(div);
+    });
+}
+
+// Clear local history
+function clearLocalHistory() {
+    if (confirm('Are you sure you want to clear your local posting history? This cannot be undone.')) {
+        try {
+            localStorage.removeItem(HISTORY_KEY);
+            displayLocalHistory();
+            alert('Local history cleared successfully.');
+        } catch (error) {
+            console.error('Failed to clear local history:', error);
+            alert('Failed to clear local history.');
+        }
+    }
+}
